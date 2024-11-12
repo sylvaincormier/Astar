@@ -134,10 +134,10 @@ use pallet_safe_mode;
 use pallet_tx_pause;
 type SafeModeTxPauseFilter = InsideBoth<SafeModeWhitelistedCalls, TxPauseWhitelistedCalls>;
 type BaseCallFilter = InsideBoth<BaseFilter, SafeModeTxPauseFilter>;
-use frame_support::traits::InsideBoth;
-use frame_system::EnsureWithSuccess;
-use frame_system::pallet_prelude::BlockNumberFor;
 use frame_support::traits::EitherOfDiverse;
+use frame_support::traits::InsideBoth;
+use frame_system::pallet_prelude::BlockNumberFor;
+use frame_system::EnsureWithSuccess;
 /// Constant values used within the runtime.
 pub const MICROSBY: Balance = 1_000_000_000_000;
 pub const MILLISBY: Balance = 1_000 * MICROSBY;
@@ -1531,9 +1531,7 @@ parameter_types! {
 impl pallet_migrations::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     #[cfg(not(feature = "runtime-benchmarks"))]
-    type Migrations = (
-       
-    );
+    type Migrations = ();
     // Benchmarks need mocked migrations to guarantee that they succeed.
     #[cfg(feature = "runtime-benchmarks")]
     type Migrations = pallet_migrations::mock_helpers::MockedMigrations;
@@ -1711,6 +1709,11 @@ impl Contains<RuntimeCall> for SafeModeWhitelistedCalls {
         }
     }
 }
+
+// OpsMaintainer origins
+// pub type MoreThanHalfCouncil = EnsureMoreThanHalfOfCouncil<Runtime>;
+// pub type EmergencyAuthority = EitherOfDiverse<MoreThanHalfCouncil, EnsureRootOrAllTechnicalCommittee>;
+// pub type EmergencyAuthorityWithSuccess<Success = BlockNumberFor<Self>> = EnsureWithSuccess<EmergencyAuthority, AccountId, Success>;
 
 impl pallet_safe_mode::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
