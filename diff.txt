@@ -1,0 +1,24 @@
+diff --git a/runtime/shibuya/src/lib.rs b/runtime/shibuya/src/lib.rs
+index 373a9804..0319d56a 100644
+--- a/runtime/shibuya/src/lib.rs
++++ b/runtime/shibuya/src/lib.rs
+@@ -1711,9 +1711,16 @@ impl Contains<RuntimeCall> for SafeModeWhitelistedCalls {
+ }
+ 
+ // OpsMaintainer origins
+-// pub type MoreThanHalfCouncil = EnsureMoreThanHalfOfCouncil<Runtime>;
+-// pub type EmergencyAuthority = EitherOfDiverse<MoreThanHalfCouncil, EnsureRootOrAllTechnicalCommittee>;
+-// pub type EmergencyAuthorityWithSuccess<Success = BlockNumberFor<Self>> = EnsureWithSuccess<EmergencyAuthority, AccountId, Success>;
++pub type MoreThanHalfCouncil = pallet_collective::EnsureProportionMoreThan<AccountId, MainCouncilCollectiveInst, 1, 2>;
++pub type EmergencyAuthority = EitherOfDiverse<
++    MoreThanHalfCouncil,
++    EnsureRootOrAllTechnicalCommittee
++>;
++pub type EmergencyAuthorityWithSuccess = EnsureWithSuccess<
++    EmergencyAuthority,
++    AccountId,
++    BlockNumberFor<Runtime>
++>;
+ 
+ impl pallet_safe_mode::Config for Runtime {
+     type RuntimeEvent = RuntimeEvent;
