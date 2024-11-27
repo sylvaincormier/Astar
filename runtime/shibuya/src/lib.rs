@@ -111,11 +111,11 @@ use sp_version::RuntimeVersion;
 
 pub use frame_system::Call as SystemCall;
 pub use pallet_balances::Call as BalancesCall;
+use pallet_dapp_staking::migration::versioned_migrations;
 use parachains_common::message_queue::NarrowOriginToSibling;
 pub use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 #[cfg(any(feature = "std", test))]
 pub use sp_runtime::BuildStorage;
-use pallet_dapp_staking::migration::versioned_migrations;
 mod chain_extensions;
 pub mod genesis_config;
 mod precompiles;

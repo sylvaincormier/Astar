@@ -42,6 +42,7 @@ use astar_primitives::{
     dapp_staking::{Observer as DappStakingObserver, SmartContract, StandardTierSlots},
     Balance, BlockNumber,
 };
+use frame_support::weights::RuntimeDbWeight;
 use frame_system::{EnsureRoot, EnsureSignedBy};
 
 pub(crate) type AccountId = u64;
@@ -59,6 +60,13 @@ construct_runtime!(
         MultiBlockMigrations: pallet_migrations,
     }
 );
+
+parameter_types! {
+    pub const DbWeight: RuntimeDbWeight = RuntimeDbWeight {
+        read: 25_000_000,
+        write: 100_000_000,
+    };
+}
 
 parameter_types! {
     pub const BlockHashCount: BlockNumber = 250;
@@ -80,7 +88,7 @@ impl frame_system::Config for Test {
     type Lookup = IdentityLookup<Self::AccountId>;
     type RuntimeEvent = RuntimeEvent;
     type BlockHashCount = BlockHashCount;
-    type DbWeight = ();
+    type DbWeight = DbWeight;
     type Version = ();
     type PalletInfo = PalletInfo;
     type AccountData = pallet_balances::AccountData<Balance>;
@@ -120,11 +128,7 @@ parameter_types! {
 
 #[derive_impl(pallet_migrations::config_preludes::TestDefaultConfig)]
 impl pallet_migrations::Config for Test {
-    #[cfg(not(feature = "runtime-benchmarks"))]
-    type Migrations =
-        (crate::migration::LazyMigration<Test, crate::weights::SubstrateWeight<Test>>,);
-    #[cfg(feature = "runtime-benchmarks")]
-    type Migrations = pallet_migrations::mock_helpers::MockedMigrations;
+    type Migrations = (crate::migration::v9::LazyV8ToV9Migration<Test>,);
     type MigrationStatusHandler = ();
     type MaxServiceWeight = MaxServiceWeight;
 }

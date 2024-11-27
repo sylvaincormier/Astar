@@ -123,8 +123,8 @@ pub mod xcm_config;
 
 pub type AstarAssetLocationIdConverter = AssetLocationIdConverter<AssetId, XcAssetConfig>;
 
-pub use precompiles::{AstarPrecompiles, ASSET_PRECOMPILE_ADDRESS_PREFIX};
 use pallet_dapp_staking::migration::versioned_migrations;
+pub use precompiles::{AstarPrecompiles, ASSET_PRECOMPILE_ADDRESS_PREFIX};
 pub type Precompiles = AstarPrecompiles<Runtime, AstarAssetLocationIdConverter>;
 
 use chain_extensions::AstarChainExtensions;

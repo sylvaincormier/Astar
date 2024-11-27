@@ -17,13 +17,13 @@
 // along with Astar. If not, see <http://www.gnu.org/licenses/>.
 
 use super::*;
+use frame_support::StorageDoubleMap;
 use frame_support::{
     migrations::{MigrationId, SteppedMigration, SteppedMigrationError},
     storage_alias,
     traits::{OnRuntimeUpgrade, UncheckedOnRuntimeUpgrade},
     weights::WeightMeter,
 };
-use frame_support::StorageDoubleMap;
 #[cfg(feature = "try-runtime")]
 use sp_std::vec::Vec;
 
@@ -36,7 +36,7 @@ pub mod versioned_migrations {
     pub type V8ToV9<T> = frame_support::migrations::VersionedMigration<
         8,
         9,
-        v9::VersionMigrateV8ToV9<T>,
+        v9::LazyV8ToV9Migration<T>,
         Pallet<T>,
         <T as frame_system::Config>::DbWeight,
     >;
@@ -61,10 +61,10 @@ pub mod versioned_migrations {
             <T as frame_system::Config>::DbWeight,
         >;
 }
-
 pub mod v9 {
     use super::*;
     use crate::{BonusStatus, Config, Pallet, StakeAmount};
+    use frame_support::{storage_alias, Blake2_128Concat};
 
     #[derive(Encode, Decode, Clone, Debug)]
     pub struct OldSingularStakingInfo {
@@ -87,54 +87,156 @@ pub mod v9 {
         <T as frame_system::Config>::AccountId,
         Blake2_128Concat,
         <T as Config>::SmartContract,
-        NewSingularStakingInfo,  // Changed to NewSingularStakingInfo
+        NewSingularStakingInfo,
         OptionQuery,
     >;
 
-    pub struct VersionMigrateV8ToV9<T>(PhantomData<T>);
+    #[storage_alias]
+    pub type OldStakerInfo<T: Config> = StorageDoubleMap<
+        Pallet<T>,
+        Blake2_128Concat,
+        <T as frame_system::Config>::AccountId,
+        Blake2_128Concat,
+        <T as Config>::SmartContract,
+        OldSingularStakingInfo,
+        OptionQuery,
+    >;
 
-    impl<T: Config> UncheckedOnRuntimeUpgrade for VersionMigrateV8ToV9<T> {
-        fn on_runtime_upgrade() -> Weight {
-            let current = Pallet::<T>::in_code_storage_version();
+    pub struct LazyV8ToV9Migration<T>(PhantomData<T>);
 
-            let mut translated = 0usize;
+    impl<T: Config> SteppedMigration for LazyV8ToV9Migration<T> {
+        type Cursor = (T::AccountId, T::SmartContract);
+        type Identifier = MigrationId<16>;
 
-            StakerInfo::<T>::translate(|_account, _contract, old_value: OldSingularStakingInfo| {
-                translated.saturating_inc();
-                
-                let bonus_status = if old_value.loyal_staker {
-                    BonusStatus::SafeMovesRemaining(T::MaxBonusMovesPerPeriod::get().into())
+        fn id() -> Self::Identifier {
+            MigrationId {
+                pallet_id: *b"dapp-staking-v9m",
+                version_from: 8,
+                version_to: 9,
+            }
+        }
+
+        fn step(
+            cursor: Option<Self::Cursor>,
+            meter: &mut WeightMeter,
+        ) -> Result<Option<Self::Cursor>, SteppedMigrationError> {
+            let db_weight = T::DbWeight::get();
+
+            // Weight for one entry migration (read + write + delete)
+            let entry_weight = db_weight.reads(1).saturating_add(db_weight.writes(2));
+
+            // Get iterator starting from cursor
+            let mut iter = if let Some((ref account, _)) = cursor {
+                OldStakerInfo::<T>::iter_from(account.encode())
+            } else {
+                OldStakerInfo::<T>::iter()
+            };
+
+            // Keep track of last processed item for cursor
+            let mut last_processed = None;
+
+            // Process entries until we run out of weight or entries
+            while meter.remaining().any_gte(entry_weight) {
+                if let Some((account, contract, old_value)) = iter.next() {
+                    // Consume weight for this entry
+                    meter.try_consume(entry_weight).map_err(|_| {
+                        SteppedMigrationError::InsufficientWeight {
+                            required: entry_weight,
+                        }
+                    })?;
+
+                    // Migrate entry
+                    StakerInfo::<T>::insert(
+                        account.clone(),
+                        contract.clone(),
+                        NewSingularStakingInfo {
+                            previous_staked: old_value.previous_staked,
+                            staked: old_value.staked,
+                            bonus_status: if old_value.loyal_staker {
+                                BonusStatus::SafeMovesRemaining(
+                                    T::MaxBonusMovesPerPeriod::get().into(),
+                                )
+                            } else {
+                                BonusStatus::NoBonus
+                            },
+                        },
+                    );
+
+                    // Remove old entry
+                    OldStakerInfo::<T>::remove(account.clone(), contract.clone());
+
+                    log::info!(
+                        target: "runtime::dapp-staking",
+                        "👉 Migrated entry for account: {:?}, contract: {:?}",
+                        account,
+                        contract
+                    );
+
+                    last_processed = Some((account, contract));
                 } else {
-                    BonusStatus::NoBonus
-                };
+                    // No more entries to process
+                    return Ok(None);
+                }
+            }
 
-                Some(NewSingularStakingInfo {
-                    previous_staked: old_value.previous_staked,
-                    staked: old_value.staked,
-                    bonus_status,
-                })
-            });
-
-            current.put::<Pallet<T>>();
-
-            log::info!("Upgraded {translated} StakerInfo entries to {current:?}");
-
-            T::DbWeight::get().reads_writes(1 + translated as u64, 1 + translated as u64)
+            // Return cursor for next step if there are more entries to process
+            Ok(last_processed)
         }
+    }
 
-        #[cfg(feature = "try-runtime")]
-        fn pre_upgrade() -> Result<Vec<u8>, TryRuntimeError> {
-            Ok(Vec::new())
-        }
+    impl<T: Config> OnRuntimeUpgrade for LazyV8ToV9Migration<T> {
+        fn on_runtime_upgrade() -> Weight {
+            let mut total_translated = 0u32;
+            let db_weight = T::DbWeight::get();
+            let mut total_weight = db_weight.reads(1); // Initial read
 
-        #[cfg(feature = "try-runtime")]
-        fn post_upgrade(_: Vec<u8>) -> Result<(), TryRuntimeError> {
-            ensure!(
-                Pallet::<T>::on_chain_storage_version() >= 9,
-                "dapp-staking::migration::v9: Wrong storage version"
+            // Cache all old entries to iterate over them
+            let old_entries: Vec<_> = OldStakerInfo::<T>::iter().collect();
+            total_weight = total_weight.saturating_add(db_weight.reads(1)); // Read for iteration
+
+            // Process each entry
+            for (account, contract, old_value) in old_entries {
+                // Read weight
+                total_weight = total_weight.saturating_add(db_weight.reads(1));
+
+                // Insert new format
+                StakerInfo::<T>::insert(
+                    account.clone(),
+                    contract.clone(),
+                    NewSingularStakingInfo {
+                        previous_staked: old_value.previous_staked,
+                        staked: old_value.staked,
+                        bonus_status: if old_value.loyal_staker {
+                            BonusStatus::SafeMovesRemaining(T::MaxBonusMovesPerPeriod::get().into())
+                        } else {
+                            BonusStatus::NoBonus
+                        },
+                    },
+                );
+
+                // Write weight
+                total_weight = total_weight.saturating_add(db_weight.writes(1));
+
+                // Remove old entry
+                OldStakerInfo::<T>::remove(account.clone(), contract.clone());
+                total_weight = total_weight.saturating_add(db_weight.writes(1));
+
+                total_translated = total_translated.saturating_add(1);
+            }
+
+            // Add final version update weight if any translations occurred
+            if total_translated > 0 {
+                total_weight = total_weight.saturating_add(db_weight.writes(1));
+            }
+
+            log::info!(
+                target: "runtime::dapp-staking",
+                "👉 Completed migration of {} entries with weight {:?}",
+                total_translated,
+                total_weight
             );
 
-            Ok(())
+            total_weight
         }
     }
 }
@@ -607,4 +709,130 @@ impl<T: Config> OnRuntimeUpgrade for AdjustEraMigration<T> {
         });
         T::DbWeight::get().reads_writes(1, 1)
     }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        migration::v9::{LazyV8ToV9Migration, OldSingularStakingInfo, OldStakerInfo, StakerInfo},
+        test::mock::{ExtBuilder, MockSmartContract, Test},
+    };
+    use frame_support::weights::{Weight, WeightMeter};
+
+    #[test]
+fn v8_to_v9_migration_works() {
+    ExtBuilder::default().build().execute_with(|| {
+        let account = 1u64;
+        let smart_contract = MockSmartContract::wasm(1);
+
+        let old_info = OldSingularStakingInfo {
+            previous_staked: StakeAmount {
+                voting: 0,
+                build_and_earn: 0,
+                era: 1,
+                period: 1,
+            },
+            staked: StakeAmount {
+                voting: 100,
+                build_and_earn: 0,
+                era: 1,
+                period: 1,
+            },
+            loyal_staker: true,
+        };
+        
+        // Insert test data
+        OldStakerInfo::<Test>::insert(account, smart_contract.clone(), old_info);
+
+        // Set up meter with sufficient weight
+        let mut meter = WeightMeter::with_limit(Weight::MAX);
+        
+        // Process migration
+        let result = LazyV8ToV9Migration::<Test>::step(None, &mut meter);
+        assert!(result.is_ok(), "Migration step should succeed");
+        
+        // Calculate consumed weight
+        let consumed = Weight::MAX.saturating_sub(meter.remaining());
+        assert!(consumed.any_gt(Weight::zero()), "Weight should be non-zero for migration operations");
+
+        // Verify migration results
+        let stored_info = StakerInfo::<Test>::get(account, smart_contract).unwrap();
+        assert_eq!(
+            stored_info.bonus_status,
+            BonusStatus::SafeMovesRemaining(<Test as Config>::MaxBonusMovesPerPeriod::get().into())
+        );
+    });
+}
+
+#[test]
+fn migration_weight_check() {
+    ExtBuilder::default().build().execute_with(|| {
+        let account = 1u64;
+        let smart_contract = MockSmartContract::wasm(1);
+
+        // Insert multiple test entries
+        println!("Inserting test entries...");
+        for i in 0..3 {
+            let old_info = OldSingularStakingInfo {
+                previous_staked: StakeAmount {
+                    voting: 0,
+                    build_and_earn: 0,
+                    era: 1,
+                    period: 1,
+                },
+                staked: StakeAmount {
+                    voting: 100,
+                    build_and_earn: 0,
+                    era: 1,
+                    period: 1,
+                },
+                loyal_staker: true,
+            };
+            OldStakerInfo::<Test>::insert(account + i, smart_contract.clone(), old_info);
+        }
+
+        println!("Old entries count: {}", OldStakerInfo::<Test>::iter().count());
+
+        // Process migration
+        let mut cursor = None;
+        let mut meter = WeightMeter::with_limit(Weight::MAX);
+        let initial_weight = meter.remaining();
+        
+        println!("Starting migration...");
+        while let Ok(maybe_next) = LazyV8ToV9Migration::<Test>::step(cursor, &mut meter) {
+            match maybe_next {
+                Some(next_cursor) => {
+                    cursor = Some(next_cursor);
+                    println!("Step completed with cursor: {:?}", next_cursor.0);
+                }
+                None => {
+                    println!("Migration complete");
+                    break;
+                }
+            }
+        }
+
+        // Calculate total consumed weight
+        let consumed = initial_weight.saturating_sub(meter.remaining());
+        println!("Total weight consumed: {:?}", consumed);
+        assert!(consumed.any_gt(Weight::zero()), "Weight should be non-zero");
+
+        // Verify results
+        assert_eq!(StakerInfo::<Test>::iter().count(), 3, "Should have migrated all entries");
+        assert_eq!(OldStakerInfo::<Test>::iter().count(), 0, "Should have removed all old entries");
+
+        // Verify individual entries
+        for i in 0..3 {
+            let acc = account + i;
+            let stored_info = StakerInfo::<Test>::get(acc, smart_contract.clone())
+                .expect("Entry should exist after migration");
+            assert_eq!(
+                stored_info.bonus_status,
+                BonusStatus::SafeMovesRemaining(<Test as Config>::MaxBonusMovesPerPeriod::get().into())
+            );
+        }
+    });
+}
+
+   
 }
