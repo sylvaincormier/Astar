@@ -207,7 +207,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("shibuya"),
     impl_name: create_runtime_str!("shibuya"),
     authoring_version: 1,
-    spec_version: 1000,
+    spec_version: 1100,
     impl_version: 0,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 3,
@@ -1014,7 +1014,7 @@ pub enum ProxyType {
     Balances,
     /// All Runtime calls from Pallet Assets allowed for proxy account
     Assets,
-    /// Not used at the moment, but kept for backwards compatibility.
+    /// All governance related calls allowed for proxy account
     Governance,
     /// Only provide_judgement call from pallet identity allowed for proxy account
     IdentityJudgement,
@@ -1103,8 +1103,15 @@ impl InstanceFilter<RuntimeCall> for ProxyType {
                     )
                 )
             }
-            // Not used at the moment, but kept for backwards compatibility.
-            ProxyType::Governance => false,
+            ProxyType::Governance => {
+                matches!(
+                    c,
+                    RuntimeCall::Democracy(..)
+                        | RuntimeCall::Council(..)
+                        | RuntimeCall::TechnicalCommittee(..)
+                        | RuntimeCall::CommunityCouncil(..)
+                )
+            }
         }
     }
 
@@ -1541,11 +1548,6 @@ impl pallet_migrations::Config for Runtime {
 
 #[cfg(feature = "runtime-benchmarks")]
 impl vesting_mbm::Config for Runtime {}
-
-impl cumulus_pallet_xcmp_queue::migration::v5::V5Config for Runtime {
-    // This must be the same as the `ChannelInfo` from the `Config`:
-    type ChannelList = ParachainSystem;
-}
 
 construct_runtime!(
     pub struct Runtime
