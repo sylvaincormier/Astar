@@ -17,6 +17,9 @@
 // along with Astar. If not, see <http://www.gnu.org/licenses/>.
 
 use super::*;
+use crate::migration::v9::LazyV8ToV9Migration;
+
+
 use frame_support::StorageDoubleMap;
 use frame_support::{
     migrations::{MigrationId, SteppedMigration, SteppedMigrationError},
@@ -710,6 +713,40 @@ impl<T: Config> OnRuntimeUpgrade for AdjustEraMigration<T> {
         T::DbWeight::get().reads_writes(1, 1)
     }
 }
+
+
+impl<T: Config> UncheckedOnRuntimeUpgrade for LazyV8ToV9Migration<T> {
+    fn on_runtime_upgrade() -> Weight {
+        let mut cursor = None;
+        let mut total_weight = Weight::zero();
+        let mut meter = WeightMeter::with_limit(Weight::MAX);
+
+        while let Ok(maybe_next) = Self::step(cursor, &mut meter) {
+            match maybe_next {
+                Some(next_cursor) => cursor = Some(next_cursor),
+                None => break,
+            }
+            total_weight = total_weight.saturating_add(T::DbWeight::get().reads_writes(1, 2));
+        }
+
+        total_weight.saturating_add(T::DbWeight::get().writes(1))
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn pre_upgrade() -> Result<Vec<u8>, TryRuntimeError> {
+        let count = OldStakerInfo::<T>::iter().count();
+        Ok(count.encode())
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn post_upgrade(data: Vec<u8>) -> Result<(), TryRuntimeError> {
+        let expected: usize = Decode::decode(&mut &data[..])
+            .map_err(|_| TryRuntimeError::Other("Count decode failed"))?;
+        let actual = StakerInfo::<T>::iter().count();
+        ensure!(actual == expected, "Count mismatch");
+        Ok(())
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -720,59 +757,11 @@ mod tests {
     use frame_support::weights::{Weight, WeightMeter};
 
     #[test]
-fn v8_to_v9_migration_works() {
-    ExtBuilder::default().build().execute_with(|| {
-        let account = 1u64;
-        let smart_contract = MockSmartContract::wasm(1);
+    fn v8_to_v9_migration_works() {
+        ExtBuilder::default().build().execute_with(|| {
+            let account = 1u64;
+            let smart_contract = MockSmartContract::wasm(1);
 
-        let old_info = OldSingularStakingInfo {
-            previous_staked: StakeAmount {
-                voting: 0,
-                build_and_earn: 0,
-                era: 1,
-                period: 1,
-            },
-            staked: StakeAmount {
-                voting: 100,
-                build_and_earn: 0,
-                era: 1,
-                period: 1,
-            },
-            loyal_staker: true,
-        };
-        
-        // Insert test data
-        OldStakerInfo::<Test>::insert(account, smart_contract.clone(), old_info);
-
-        // Set up meter with sufficient weight
-        let mut meter = WeightMeter::with_limit(Weight::MAX);
-        
-        // Process migration
-        let result = LazyV8ToV9Migration::<Test>::step(None, &mut meter);
-        assert!(result.is_ok(), "Migration step should succeed");
-        
-        // Calculate consumed weight
-        let consumed = Weight::MAX.saturating_sub(meter.remaining());
-        assert!(consumed.any_gt(Weight::zero()), "Weight should be non-zero for migration operations");
-
-        // Verify migration results
-        let stored_info = StakerInfo::<Test>::get(account, smart_contract).unwrap();
-        assert_eq!(
-            stored_info.bonus_status,
-            BonusStatus::SafeMovesRemaining(<Test as Config>::MaxBonusMovesPerPeriod::get().into())
-        );
-    });
-}
-
-#[test]
-fn migration_weight_check() {
-    ExtBuilder::default().build().execute_with(|| {
-        let account = 1u64;
-        let smart_contract = MockSmartContract::wasm(1);
-
-        // Insert multiple test entries
-        println!("Inserting test entries...");
-        for i in 0..3 {
             let old_info = OldSingularStakingInfo {
                 previous_staked: StakeAmount {
                     voting: 0,
@@ -788,51 +777,115 @@ fn migration_weight_check() {
                 },
                 loyal_staker: true,
             };
-            OldStakerInfo::<Test>::insert(account + i, smart_contract.clone(), old_info);
-        }
 
-        println!("Old entries count: {}", OldStakerInfo::<Test>::iter().count());
+            // Insert test data
+            OldStakerInfo::<Test>::insert(account, smart_contract.clone(), old_info);
 
-        // Process migration
-        let mut cursor = None;
-        let mut meter = WeightMeter::with_limit(Weight::MAX);
-        let initial_weight = meter.remaining();
-        
-        println!("Starting migration...");
-        while let Ok(maybe_next) = LazyV8ToV9Migration::<Test>::step(cursor, &mut meter) {
-            match maybe_next {
-                Some(next_cursor) => {
-                    cursor = Some(next_cursor);
-                    println!("Step completed with cursor: {:?}", next_cursor.0);
-                }
-                None => {
-                    println!("Migration complete");
-                    break;
-                }
-            }
-        }
+            // Set up meter with sufficient weight
+            let mut meter = WeightMeter::with_limit(Weight::MAX);
 
-        // Calculate total consumed weight
-        let consumed = initial_weight.saturating_sub(meter.remaining());
-        println!("Total weight consumed: {:?}", consumed);
-        assert!(consumed.any_gt(Weight::zero()), "Weight should be non-zero");
+            // Process migration
+            let result = LazyV8ToV9Migration::<Test>::step(None, &mut meter);
+            assert!(result.is_ok(), "Migration step should succeed");
 
-        // Verify results
-        assert_eq!(StakerInfo::<Test>::iter().count(), 3, "Should have migrated all entries");
-        assert_eq!(OldStakerInfo::<Test>::iter().count(), 0, "Should have removed all old entries");
+            // Calculate consumed weight
+            let consumed = Weight::MAX.saturating_sub(meter.remaining());
+            assert!(
+                consumed.any_gt(Weight::zero()),
+                "Weight should be non-zero for migration operations"
+            );
 
-        // Verify individual entries
-        for i in 0..3 {
-            let acc = account + i;
-            let stored_info = StakerInfo::<Test>::get(acc, smart_contract.clone())
-                .expect("Entry should exist after migration");
+            // Verify migration results
+            let stored_info = StakerInfo::<Test>::get(account, smart_contract).unwrap();
             assert_eq!(
                 stored_info.bonus_status,
-                BonusStatus::SafeMovesRemaining(<Test as Config>::MaxBonusMovesPerPeriod::get().into())
+                BonusStatus::SafeMovesRemaining(
+                    <Test as Config>::MaxBonusMovesPerPeriod::get().into()
+                )
             );
-        }
-    });
-}
+        });
+    }
 
-   
+    #[test]
+    fn migration_weight_check() {
+        ExtBuilder::default().build().execute_with(|| {
+            let account = 1u64;
+            let smart_contract = MockSmartContract::wasm(1);
+
+            // Insert multiple test entries
+            println!("Inserting test entries...");
+            for i in 0..3 {
+                let old_info = OldSingularStakingInfo {
+                    previous_staked: StakeAmount {
+                        voting: 0,
+                        build_and_earn: 0,
+                        era: 1,
+                        period: 1,
+                    },
+                    staked: StakeAmount {
+                        voting: 100,
+                        build_and_earn: 0,
+                        era: 1,
+                        period: 1,
+                    },
+                    loyal_staker: true,
+                };
+                OldStakerInfo::<Test>::insert(account + i, smart_contract.clone(), old_info);
+            }
+
+            println!(
+                "Old entries count: {}",
+                OldStakerInfo::<Test>::iter().count()
+            );
+
+            // Process migration
+            let mut cursor = None;
+            let mut meter = WeightMeter::with_limit(Weight::MAX);
+            let initial_weight = meter.remaining();
+
+            println!("Starting migration...");
+            while let Ok(maybe_next) = LazyV8ToV9Migration::<Test>::step(cursor, &mut meter) {
+                match maybe_next {
+                    Some(next_cursor) => {
+                        cursor = Some(next_cursor);
+                        println!("Step completed with cursor: {:?}", next_cursor.0);
+                    }
+                    None => {
+                        println!("Migration complete");
+                        break;
+                    }
+                }
+            }
+
+            // Calculate total consumed weight
+            let consumed = initial_weight.saturating_sub(meter.remaining());
+            println!("Total weight consumed: {:?}", consumed);
+            assert!(consumed.any_gt(Weight::zero()), "Weight should be non-zero");
+
+            // Verify results
+            assert_eq!(
+                StakerInfo::<Test>::iter().count(),
+                3,
+                "Should have migrated all entries"
+            );
+            assert_eq!(
+                OldStakerInfo::<Test>::iter().count(),
+                0,
+                "Should have removed all old entries"
+            );
+
+            // Verify individual entries
+            for i in 0..3 {
+                let acc = account + i;
+                let stored_info = StakerInfo::<Test>::get(acc, smart_contract.clone())
+                    .expect("Entry should exist after migration");
+                assert_eq!(
+                    stored_info.bonus_status,
+                    BonusStatus::SafeMovesRemaining(
+                        <Test as Config>::MaxBonusMovesPerPeriod::get().into()
+                    )
+                );
+            }
+        });
+    }
 }
